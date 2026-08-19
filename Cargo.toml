@@ -1,30 +1,62 @@
 [package]
 name = "spoo-me"
-version = "0.1.1"
-authors = ["rdni"]
-description = "Bindings for accessing spoo.me api"
-edition = "2021"
+version = "0.2.0"
+authors = ["spoo.me", "rdni"]
+description = "Official Rust SDK for the spoo.me URL shortener API"
+edition = "2024"
+rust-version = "1.85"
 include = [
     "/src/**",
     "/Cargo.toml",
     "/LICENSE",
     "/README.md",
-    "/tests/**"
+    "/openapi.json",
 ]
-keywords = ["async", "api", "sdk", "bindings"]
-license = "Apache-2.0"
-repository = "https://github.com/spoo-me/rust-sdk"
+keywords = ["spoo", "url-shortener", "api", "sdk", "async"]
+categories = ["api-bindings", "web-programming::http-client"]
+license = "MIT"
+repository = "https://github.com/spoo-me/spoo-rust"
+documentation = "https://docs.rs/spoo-me"
 
 [features]
-blocking = []
-custom_url = []
-full = ["custom_url"]
+default = ["stream"]
+# Lazy pagination and export bodies as `futures_core::Stream`.
+stream = ["dep:futures-core", "dep:bytes"]
+# Sign in with Spoo: PKCE helpers, device-code exchange, refreshing sessions.
+oauth = ["dep:sha2", "dep:base64", "dep:rand", "dep:tokio"]
+# Per-request tracing spans and retry events.
+tracing = ["dep:tracing"]
+# Use the platform TLS stack instead of rustls.
+native-tls = ["reqwest/native-tls"]
 
 [dependencies]
-reqwest = { version = "0.12", features = ["json", "blocking"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_urlencoded = "0.7"
-thiserror = "1.0"
-regex = "1.11"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }  # only for async use
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "query", "charset", "http2", "rustls", "webpki-roots"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+futures-core = { version = "0.3", optional = true }
+bytes = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
+base64 = { version = "0.22", optional = true }
+rand = { version = "0.9", optional = true }
+tokio = { version = "1", default-features = false, features = ["sync"], optional = true }
+tracing = { version = "0.1", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", default-features = false, features = ["time"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-timers = { version = "0.3", features = ["futures"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+wiremock = "0.6"
+futures-util = "0.3"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[[example]]
+name = "sign_in_with_spoo"
+required-features = ["oauth"]
