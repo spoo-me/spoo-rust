@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::client::Client;
 use crate::error::Error;
-use crate::http::RequestSpec;
+use crate::http::{RequestSpec, encode_segment};
 
 /// Public link surfaces, from [`crate::Client::public`].
 pub struct Public {
@@ -164,7 +164,7 @@ impl Public {
             .transport
             .execute(RequestSpec::new(
                 Method::GET,
-                format!("/api/v1/public/preview/{short_code}"),
+                format!("/api/v1/public/preview/{}", encode_segment(short_code)),
             ))
             .await
     }
@@ -188,7 +188,7 @@ impl PublicStatsBuilder {
     /// Fetch the stats page data. Sends a plain GET, or a POST carrying the
     /// password when one was provided: one method, both wire forms.
     pub async fn send(self) -> Result<PublicStats, Error> {
-        let path = format!("/api/v1/public/stats/{}", self.short_code);
+        let path = format!("/api/v1/public/stats/{}", encode_segment(&self.short_code));
         let spec = match self.password {
             Some(password) => RequestSpec::new(Method::POST, path)
                 .json(&serde_json::json!({ "password": password }))?,

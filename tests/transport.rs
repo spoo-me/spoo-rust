@@ -121,6 +121,60 @@ async fn post_retries_429_honoring_retry_after() {
 }
 
 #[tokio::test]
+async fn retry_after_beyond_the_ceiling_surfaces_instead_of_waiting() {
+    let (server, client) = common::server_and_client().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/urls/x"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "86400")
+                .set_body_json(json!({"error": "slow down", "code": "rate_limit_exceeded"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let started = std::time::Instant::now();
+    let err = client
+        .links()
+        .get("x")
+        .await
+        .expect_err("must not park the task for a day");
+    assert!(err.is_rate_limited());
+    assert_eq!(
+        err.retry_after(),
+        Some(Duration::from_secs(86400)),
+        "the full mandated wait stays readable on the error"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the client waited instead of surfacing: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn caller_supplied_segments_cannot_rewrite_the_target() {
+    let (server, client) = common::server_and_client().await;
+    // Nothing is mounted for /api/v1/urls/x: a raw "x?y" id would hit that
+    // path with a query. The encoded segment must arrive as one segment.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/urls/x%3Fy"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": "x?y", "password_set": false})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .links()
+        .get("x?y")
+        .await
+        .expect("encoded segment reaches the encoded route");
+}
+
+#[tokio::test]
 async fn envelope_error_maps_fields_and_rate_limit() {
     let (server, client) = common::server_and_client().await;
     Mock::given(method("POST"))

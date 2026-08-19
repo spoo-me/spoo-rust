@@ -20,7 +20,12 @@ pub(crate) enum Auth {
 }
 
 pub(crate) struct Transport {
-    pub(crate) http: reqwest::Client,
+    /// A caller-injected `reqwest::Client`, when one was provided.
+    pub(crate) injected_http: Option<reqwest::Client>,
+    /// Otherwise the client is built lazily on first use, because
+    /// `reqwest::Client::new` panics when TLS or resolver setup fails and
+    /// this crate's constructors promise not to.
+    pub(crate) lazy_http: std::sync::OnceLock<Result<reqwest::Client, String>>,
     /// Base URL with no trailing slash, e.g. `https://spoo.me`.
     pub(crate) base_url: String,
     pub(crate) auth: Auth,
@@ -37,6 +42,7 @@ pub(crate) struct RequestSpec {
     pub(crate) method: Method,
     pub(crate) path: String,
     pub(crate) query: Vec<(String, String)>,
+    pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: Option<serde_json::Value>,
 }
 
@@ -46,6 +52,7 @@ impl RequestSpec {
             method,
             path: path.into(),
             query: Vec::new(),
+            headers: Vec::new(),
             body: None,
         }
     }
@@ -57,6 +64,11 @@ impl RequestSpec {
         self
     }
 
+    pub(crate) fn header(mut self, name: &str, value: impl Into<String>) -> Self {
+        self.headers.push((name.to_owned(), value.into()));
+        self
+    }
+
     pub(crate) fn json(mut self, body: &impl serde::Serialize) -> Result<Self, Error> {
         self.body = Some(serde_json::to_value(body).map_err(Error::Decode)?);
         Ok(self)
@@ -64,6 +76,22 @@ impl RequestSpec {
 }
 
 impl Transport {
+    /// The HTTP client: the injected one, or a lazily built default. Build
+    /// failure surfaces as [`Error::Config`] instead of reqwest's panic.
+    pub(crate) fn http(&self) -> Result<&reqwest::Client, Error> {
+        if let Some(client) = &self.injected_http {
+            return Ok(client);
+        }
+        self.lazy_http
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .build()
+                    .map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(|e| Error::Config(format!("failed to initialize the HTTP client: {e}")))
+    }
+
     /// Send the request and decode a JSON response body.
     pub(crate) async fn execute<T: DeserializeOwned>(&self, spec: RequestSpec) -> Result<T, Error> {
         let response = self.send(spec).await?;
@@ -80,7 +108,11 @@ impl Transport {
         &self,
         spec: RequestSpec,
     ) -> Result<T, Error> {
-        let response = self.dispatch(&spec, None).await.map_err(Error::Transport)?;
+        let http = self.http()?;
+        let response = self
+            .dispatch(http, &spec, None)
+            .await
+            .map_err(Error::Transport)?;
         if !response.status().is_success() {
             return Err(Error::Api(Box::new(map_error(response).await)));
         }
@@ -89,7 +121,10 @@ impl Transport {
     }
 
     /// Send the request and return the raw successful response (exports).
+    /// 304 Not Modified counts as success so conditional requests (the emoji
+    /// catalogue's ETag revalidation) can observe it.
     pub(crate) async fn send(&self, spec: RequestSpec) -> Result<Response, Error> {
+        let http = self.http()?;
         let mut attempt: u32 = 0;
         #[cfg(feature = "oauth")]
         let mut refreshed = false;
@@ -108,9 +143,12 @@ impl Transport {
                     Some(token)
                 }
             };
-            let result = self.dispatch(&spec, bearer.as_deref()).await;
+            let result = self.dispatch(http, &spec, bearer.as_deref()).await;
             match result {
-                Ok(response) if response.status().is_success() => {
+                Ok(response)
+                    if response.status().is_success()
+                        || response.status() == StatusCode::NOT_MODIFIED =>
+                {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(
                         method = %spec.method,
@@ -133,11 +171,17 @@ impl Transport {
                             continue;
                         }
                     }
+                    // A server-mandated wait beyond the ceiling is not worth
+                    // blocking for: surface the response as the error, with
+                    // the full wait readable on it.
+                    let retry_after = retry_after_header(&response);
+                    let waitable = retry_after.is_none_or(|wait| wait <= MAX_RETRY_AFTER);
                     if attempt < self.max_retries
+                        && waitable
                         && retryable_status(&spec.method, response.status())
                     {
                         attempt += 1;
-                        let wait = backoff_delay(attempt, retry_after_header(&response));
+                        let wait = backoff_delay(attempt, retry_after);
                         #[cfg(feature = "tracing")]
                         tracing::debug!(
                             path = %spec.path,
@@ -174,12 +218,12 @@ impl Transport {
 
     async fn dispatch(
         &self,
+        http: &reqwest::Client,
         spec: &RequestSpec,
         bearer: Option<&str>,
     ) -> Result<Response, reqwest::Error> {
         let url = format!("{}{}", self.base_url, spec.path);
-        let mut request = self
-            .http
+        let mut request = http
             .request(spec.method.clone(), url)
             .header("X-Spoo-Client", &self.client_tag);
         #[cfg(not(target_arch = "wasm32"))]
@@ -188,6 +232,9 @@ impl Transport {
         }
         if !spec.query.is_empty() {
             request = request.query(&spec.query);
+        }
+        for (name, value) in &spec.headers {
+            request = request.header(name, value);
         }
         if let Some(token) = bearer {
             request = request.bearer_auth(token);
@@ -239,6 +286,12 @@ fn idempotent(method: &Method) -> bool {
     )
 }
 
+/// The longest server-mandated wait the client will sit through. A
+/// `Retry-After` beyond this is not worth blocking a task for: the 429/503
+/// surfaces instead, with the full wait readable on the error, and the
+/// caller decides how to schedule it.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
 fn retry_after_header(response: &Response) -> Option<Duration> {
     response
         .headers()
@@ -248,19 +301,20 @@ fn retry_after_header(response: &Response) -> Option<Duration> {
 }
 
 /// Jittered exponential backoff: 0.5s, 1s, 2s, ... capped at 8s, scaled to
-/// 50-100% of the base. A server-sent `Retry-After` overrides the computed
-/// wait.
+/// 50-100% of the base. A server-sent `Retry-After` (already bounded by
+/// [`MAX_RETRY_AFTER`] in the retry decision) overrides the computed wait.
 fn backoff_delay(attempt: u32, retry_after: Option<Duration>) -> Duration {
     if let Some(wait) = retry_after {
         return wait;
     }
     let exp = attempt.saturating_sub(1).min(16);
     let base_ms = (500u64.saturating_mul(1u64 << exp)).min(8_000);
-    // Cheap jitter without a rand dependency: sub-millisecond clock noise.
-    let noise = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::from(d.subsec_nanos()))
-        .unwrap_or(0);
+    // Cheap jitter without a rand dependency (rand is oauth-gated): a
+    // process-lifetime counter stepped by a large odd constant spreads
+    // concurrent retries deterministically and never touches the clock,
+    // which wasm targets cannot read through std.
+    static JITTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let noise = JITTER.fetch_add(0x9E37_79B9_7F4A_7C15, std::sync::atomic::Ordering::Relaxed);
     let jittered = base_ms / 2 + noise % (base_ms / 2 + 1);
     Duration::from_millis(jittered)
 }
@@ -345,6 +399,26 @@ fn parse_rate_limit(response: &Response) -> RateLimit {
             .and_then(|epoch| chrono::DateTime::from_timestamp(epoch, 0)),
         retry_after: header("retry-after").and_then(|v| parse_retry_after(&v, Utc::now())),
     }
+}
+
+/// Percent-encode a caller-supplied path segment (the RFC 3986 unreserved
+/// set stays literal). Keeps ids, aliases and domains from rewriting the
+/// request target with `/`, `?` or `#`.
+pub(crate) fn encode_segment(segment: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(char::from(byte));
+            }
+            _ => {
+                // Writing to a String cannot fail.
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
 }
 
 /// Reduce a server-suggested filename to a safe bare filename.
@@ -453,6 +527,16 @@ mod tests {
             "evil.json"
         );
         assert_eq!(content_disposition_filename(None, f), f);
+    }
+
+    #[test]
+    fn path_segments_encode_target_rewriting_characters() {
+        assert_eq!(encode_segment("abc-DEF_1.2~"), "abc-DEF_1.2~");
+        assert_eq!(encode_segment("a/b"), "a%2Fb");
+        assert_eq!(encode_segment("a?x=1"), "a%3Fx%3D1");
+        assert_eq!(encode_segment("a#b"), "a%23b");
+        assert_eq!(encode_segment("../x"), "..%2Fx");
+        assert_eq!(encode_segment("🚀"), "%F0%9F%9A%80");
     }
 
     #[test]

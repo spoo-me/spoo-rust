@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
 use crate::error::Error;
-use crate::http::RequestSpec;
+use crate::http::{RequestSpec, encode_segment};
 use crate::page::Page;
 use crate::patch::Patch;
 
@@ -486,7 +486,10 @@ impl Links {
     pub async fn get(&self, id: &str) -> Result<LinkItem, Error> {
         self.client
             .transport
-            .execute(RequestSpec::new(Method::GET, format!("/api/v1/urls/{id}")))
+            .execute(RequestSpec::new(
+                Method::GET,
+                format!("/api/v1/urls/{}", encode_segment(id)),
+            ))
             .await
     }
 
@@ -497,7 +500,11 @@ impl Links {
             .transport
             .execute(RequestSpec::new(
                 Method::GET,
-                format!("/api/v1/urls/{domain}/{alias}"),
+                format!(
+                    "/api/v1/urls/{}/{}",
+                    encode_segment(domain),
+                    encode_segment(alias)
+                ),
             ))
             .await
     }
@@ -514,8 +521,11 @@ impl Links {
 
     /// Enable or disable a link's redirects.
     pub async fn set_status(&self, id: &str, status: SettableStatus) -> Result<UpdatedLink, Error> {
-        let spec = RequestSpec::new(Method::PATCH, format!("/api/v1/urls/{id}/status"))
-            .json(&serde_json::json!({ "status": status }))?;
+        let spec = RequestSpec::new(
+            Method::PATCH,
+            format!("/api/v1/urls/{}/status", encode_segment(id)),
+        )
+        .json(&serde_json::json!({ "status": status }))?;
         self.client.transport.execute(spec).await
     }
 
@@ -525,7 +535,7 @@ impl Links {
             .transport
             .execute(RequestSpec::new(
                 Method::DELETE,
-                format!("/api/v1/urls/{id}"),
+                format!("/api/v1/urls/{}", encode_segment(id)),
             ))
             .await
     }
@@ -1107,8 +1117,11 @@ impl UpdateLinkBuilder {
 
     /// Apply the update.
     pub async fn send(self) -> Result<UpdatedLink, Error> {
-        let spec = RequestSpec::new(Method::PATCH, format!("/api/v1/urls/{}", self.id))
-            .json(&self.body)?;
+        let spec = RequestSpec::new(
+            Method::PATCH,
+            format!("/api/v1/urls/{}", encode_segment(&self.id)),
+        )
+        .json(&self.body)?;
         self.client.transport.execute(spec).await
     }
 }

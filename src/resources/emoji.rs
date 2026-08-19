@@ -78,33 +78,29 @@ impl Emoji {
         }
     }
 
+    /// Conditional revalidation through the normal transport, so auth,
+    /// retries, timeout and error mapping all still apply; the transport
+    /// treats 304 as success on purpose.
     async fn fetch_with_etag(&self, etag: &str) -> Result<EmojiSet, Error> {
-        let url = format!("{}/api/v1/emoji-set", self.client.transport.base_url);
-        let response = self
-            .client
-            .transport
-            .http
-            .get(url)
-            .header("X-Spoo-Client", &self.client.transport.client_tag)
-            .header("If-None-Match", etag)
-            .send()
-            .await
-            .map_err(Error::Transport)?;
+        let spec = RequestSpec::new(Method::GET, "/api/v1/emoji-set").header("If-None-Match", etag);
+        let response = self.client.transport.send(spec).await?;
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
-            let cache = lock(&self.client.emoji_cache);
-            if let Some(cached) = cache.as_ref() {
-                return Ok(cached.set.clone());
+            {
+                let cache = lock(&self.client.emoji_cache);
+                if let Some(cached) = cache.as_ref() {
+                    return Ok(cached.set.clone());
+                }
             }
+            // The cache vanished between requests: a 304 has no body, so
+            // refetch unconditionally.
+            let fresh = self
+                .client
+                .transport
+                .send(RequestSpec::new(Method::GET, "/api/v1/emoji-set"))
+                .await?;
+            return self.store(fresh).await;
         }
-        if response.status().is_success() {
-            return self.store(response).await;
-        }
-        // An error on a cache revalidation: fall back to the full path so
-        // retries and error mapping apply.
-        self.client
-            .transport
-            .execute(RequestSpec::new(Method::GET, "/api/v1/emoji-set"))
-            .await
+        self.store(response).await
     }
 
     async fn store(&self, response: reqwest::Response) -> Result<EmojiSet, Error> {

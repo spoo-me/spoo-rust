@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::client::Client;
 use crate::error::Error;
-use crate::http::{RequestSpec, content_disposition_filename};
+use crate::http::{RequestSpec, content_disposition_filename, encode_segment};
 
 /// Statistics and exports, from [`crate::Client::stats`].
 pub struct Stats {
@@ -363,7 +363,7 @@ impl Stats {
     pub fn export_link(&self, url_id: impl Into<String>) -> ExportBuilder {
         ExportBuilder {
             client: self.client.clone(),
-            path: format!("/api/v1/export/links/{}", url_id.into()),
+            path: format!("/api/v1/export/links/{}", encode_segment(&url_id.into())),
             format: None,
             core: QueryCore::default(),
         }
@@ -528,7 +528,7 @@ impl LinkStatsBuilder {
     pub async fn send(self) -> Result<LinkStatsReport, Error> {
         let spec = self.core.apply(RequestSpec::new(
             Method::GET,
-            format!("/api/v1/stats/links/{}", self.url_id),
+            format!("/api/v1/stats/links/{}", encode_segment(&self.url_id)),
         ))?;
         self.client.transport.execute(spec).await
     }

@@ -223,10 +223,15 @@ impl ClientBuilder {
     /// Build the client, validating configuration.
     pub fn build(self) -> Result<Client, Error> {
         if let Some(url) = &self.base_url {
-            if !url.starts_with("http://") && !url.starts_with("https://") {
+            let parsed = reqwest::Url::parse(url)
+                .map_err(|e| Error::Config(format!("base_url {url:?} is not a valid URL: {e}")))?;
+            if !matches!(parsed.scheme(), "http" | "https") {
                 return Err(Error::Config(format!(
-                    "base_url must start with http:// or https://, got {url:?}"
+                    "base_url must use http or https, got {url:?}"
                 )));
+            }
+            if parsed.host_str().is_none() {
+                return Err(Error::Config(format!("base_url {url:?} has no host")));
             }
         }
         Ok(self.build_unchecked())
@@ -255,7 +260,8 @@ impl ClientBuilder {
             .trim_end_matches('/')
             .to_owned();
         let transport = Transport {
-            http: self.http_client.unwrap_or_default(),
+            injected_http: self.http_client,
+            lazy_http: std::sync::OnceLock::new(),
             base_url,
             auth,
             client_tag: self
@@ -284,6 +290,9 @@ mod tests {
     #[test]
     fn builder_rejects_bad_base_url() {
         assert!(Client::builder().base_url("spoo.me").build().is_err());
+        assert!(Client::builder().base_url("http://").build().is_err());
+        assert!(Client::builder().base_url("https://?").build().is_err());
+        assert!(Client::builder().base_url("ftp://spoo.me").build().is_err());
         assert!(
             Client::builder()
                 .base_url("https://spoo.me/")
