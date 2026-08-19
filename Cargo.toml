@@ -23,7 +23,7 @@ default = ["stream"]
 # Lazy pagination and export bodies as `futures_core::Stream`.
 stream = ["dep:futures-core", "dep:bytes"]
 # Sign in with Spoo: PKCE helpers, device-code exchange, refreshing sessions.
-oauth = ["dep:sha2", "dep:base64", "dep:rand", "dep:tokio"]
+oauth = ["dep:sha2", "dep:base64", "dep:rand", "dep:tokio", "dep:getrandom"]
 # Per-request tracing spans and retry events.
 tracing = ["dep:tracing"]
 # Use the platform TLS stack instead of rustls.
@@ -48,6 +48,9 @@ tokio = { version = "1", default-features = false, features = ["time"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-timers = { version = "0.3", features = ["futures"] }
+# rand's randomness source; on wasm the final binary must also build with
+# RUSTFLAGS='--cfg getrandom_backend="wasm_js"' (getrandom's documented model).
+getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

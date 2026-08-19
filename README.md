@@ -310,6 +310,10 @@ worth an issue on this repo.
 | `tracing` | no | Per-request spans and retry events |
 | `native-tls` | no | Platform TLS instead of rustls |
 
+Using `oauth` on wasm32? getrandom requires the final binary to pick its
+backend: add `--cfg getrandom_backend="wasm_js"` to your RUSTFLAGS (usually
+via `.cargo/config.toml`).
+
 ## Credits
 
 The original `spoo-me` crate was created and designed by

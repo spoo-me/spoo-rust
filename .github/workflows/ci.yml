@@ -71,7 +71,11 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --target wasm32-unknown-unknown
+      # getrandom's wasm backend is chosen by the final binary via RUSTFLAGS;
+      # this check builds the way a wasm consumer of the oauth feature must.
       - run: cargo check --target wasm32-unknown-unknown --features oauth
+        env:
+          RUSTFLAGS: -D warnings --cfg getrandom_backend="wasm_js"
 
   docs:
     runs-on: ubuntu-latest
