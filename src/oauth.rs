@@ -61,7 +61,10 @@ fn random_string(len: usize) -> String {
 
 /// An access/refresh token pair. Refresh tokens rotate: after a refresh the
 /// pair you held before is dead.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Debug` deliberately redacts both tokens: a refresh token in a log line
+/// is a long-lived credential leak.
+#[derive(Clone, Deserialize)]
 #[non_exhaustive]
 pub struct TokenPair {
     /// JWT access token.
@@ -80,8 +83,19 @@ impl TokenPair {
     }
 }
 
+impl std::fmt::Debug for TokenPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenPair")
+            .field("access_token", &"[redacted]")
+            .field("refresh_token", &"[redacted]")
+            .finish()
+    }
+}
+
 /// The result of a device-code exchange: tokens plus the signed-in user.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Debug` deliberately redacts both tokens.
+#[derive(Clone, Deserialize)]
 #[non_exhaustive]
 pub struct DeviceTokens {
     /// JWT access token.
@@ -96,6 +110,16 @@ impl DeviceTokens {
     /// The token pair, for building a [`Session`].
     pub fn tokens(&self) -> TokenPair {
         TokenPair::new(self.access_token.clone(), self.refresh_token.clone())
+    }
+}
+
+impl std::fmt::Debug for DeviceTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceTokens")
+            .field("access_token", &"[redacted]")
+            .field("refresh_token", &"[redacted]")
+            .field("user", &self.user)
+            .finish()
     }
 }
 
@@ -239,7 +263,9 @@ impl Session {
     }
 
     /// Called after every successful refresh with the rotated pair.
-    /// Persist it there: the previous refresh token is already dead.
+    /// Persist it there: the previous refresh token is already dead. The
+    /// hook runs on the async executor, so keep it quick; move slow writes
+    /// onto a blocking task.
     pub fn on_refresh(mut self, hook: impl Fn(&TokenPair) + Send + Sync + 'static) -> Session {
         self.on_refresh = Some(Box::new(hook));
         self
@@ -266,10 +292,19 @@ impl Session {
         let stale = state
             .expires_at
             .is_some_and(|exp| utc_now_secs() + self.expiry_skew.as_secs() as i64 >= exp);
-        if stale {
-            self.rotate_locked(&mut state, transport).await?;
+        let rotated = if stale {
+            Some(self.rotate_locked(&mut state, transport).await?)
+        } else {
+            None
+        };
+        let result = (state.tokens.access_token.clone(), state.generation);
+        // The hook runs outside the lock: a synchronous persistence write in
+        // it must not stall every other request sharing this session.
+        drop(state);
+        if let Some(pair) = rotated {
+            self.notify(&pair);
         }
-        Ok((state.tokens.access_token.clone(), state.generation))
+        Ok(result)
     }
 
     /// Refresh after a 401, unless another task already rotated past the
@@ -283,22 +318,28 @@ impl Session {
         if state.generation != seen_generation {
             return Ok(());
         }
-        self.rotate_locked(&mut state, transport).await
+        let pair = self.rotate_locked(&mut state, transport).await?;
+        drop(state);
+        self.notify(&pair);
+        Ok(())
     }
 
     async fn rotate_locked(
         &self,
         state: &mut SessionState,
         transport: &Transport,
-    ) -> Result<(), Error> {
+    ) -> Result<TokenPair, Error> {
         let pair = refresh_call(transport, &state.tokens.refresh_token).await?;
         state.expires_at = decode_exp(&pair.access_token);
-        state.tokens = pair;
+        state.tokens = pair.clone();
         state.generation += 1;
+        Ok(pair)
+    }
+
+    fn notify(&self, pair: &TokenPair) {
         if let Some(hook) = &self.on_refresh {
-            hook(&state.tokens);
+            hook(pair);
         }
-        Ok(())
     }
 }
 
