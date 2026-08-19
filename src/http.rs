@@ -26,6 +26,8 @@ pub(crate) struct Transport {
     pub(crate) auth: Auth,
     pub(crate) client_tag: String,
     pub(crate) max_retries: u32,
+    // Read only on native targets: wasm hosts own request lifetimes.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) timeout: Duration,
 }
 
