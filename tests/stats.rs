@@ -1,5 +1,6 @@
 //! Stats and export wire tests, including the filename law.
 
+#![cfg(not(target_arch = "wasm32"))]
 mod common;
 
 use serde_json::json;

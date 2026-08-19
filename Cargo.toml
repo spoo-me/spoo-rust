@@ -51,7 +51,9 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 # RUSTFLAGS='--cfg getrandom_backend="wasm_js"' (getrandom's documented model).
 getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
 
-[dev-dependencies]
+# Native-only: wiremock and the multi-threaded tokio runtime do not build
+# for wasm32, and wasm-pack compiles every test target for that platform.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 wiremock = "0.6"
 futures-util = "0.3"

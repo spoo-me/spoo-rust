@@ -1,6 +1,6 @@
 //! Sign in with Spoo: PKCE, exchange, and the refreshing session's
 //! guarantees (rotation, single-flight, expiry).
-#![cfg(feature = "oauth")]
+#![cfg(all(feature = "oauth", not(target_arch = "wasm32")))]
 
 mod common;
 

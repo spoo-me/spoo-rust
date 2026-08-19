@@ -1,5 +1,6 @@
 //! Transport behavior: retries, error mapping, headers.
 
+#![cfg(not(target_arch = "wasm32"))]
 mod common;
 
 use serde_json::json;

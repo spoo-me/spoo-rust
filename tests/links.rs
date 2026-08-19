@@ -1,6 +1,7 @@
 //! Wire-level tests for the links resource: exact request bytes, exact
 //! response decoding.
 
+#![cfg(not(target_arch = "wasm32"))]
 mod common;
 
 use serde_json::json;
