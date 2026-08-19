@@ -18,7 +18,7 @@ println!("{}", link.short_url); // https://spoo.me/launch
 # }
 ```
 
-- Async-first on `reqwest` with rustls, wasm32 supported
+- Async-first on `reqwest` with rustls; compiles for wasm32 (checked in CI)
 - Typed errors, automatic retries, streaming pagination and exports
 - Timestamps in and out as `chrono::DateTime<Utc>`, whatever the wire format
 - Anonymous, API key, and Sign in with Spoo authentication
@@ -30,7 +30,11 @@ println!("{}", link.short_url); // https://spoo.me/launch
 cargo add spoo-me
 ```
 
-Requires Rust 1.85 or newer.
+Requires Rust 1.85 or newer. The command installs the SDK only; snippets on
+this page also use `chrono` (timestamps in the public types), and some use
+`reqwest` (client injection), `futures-util` (stream combinators) or `serde`
+with the `derive` feature (escape-hatch response types). Add the ones your
+code names.
 
 ## Authentication
 
@@ -166,8 +170,9 @@ println!("{} clicks", report.summary.total_clicks);
 
 let per_link = client.stats().for_link("665f0c2f9e7a4b1d2c3d4e5f").send().await?;
 
-// Exports stream; filenames from the server are reduced to a safe bare
-// name before you see them, so joining into a directory is safe.
+// Exports stream; filenames from the server are reduced to a bare name
+// (no separators or dot-segments), so joining one into a directory cannot
+// traverse out of it. Choosing a safe directory remains your job.
 let export = client
     .stats()
     .export_link("665f0c2f9e7a4b1d2c3d4e5f")
@@ -239,12 +244,15 @@ use spoo_me::oauth::{generate_pkce_pair, generate_state, Session, TokenPair};
 
 let anon = spoo_me::Client::anonymous();
 let pkce = generate_pkce_pair();
+let state = generate_state();
 let url = anon
     .oauth()
-    .authorization_url("your_app_id", generate_state(), &pkce.challenge)
+    .authorization_url("your_app_id", &state, &pkce.challenge)
     .redirect_uri("http://127.0.0.1:8000/callback")
     .build()?;
-// Open `url` in a browser; your callback receives a one-time code.
+// Open `url` in a browser; your callback receives `code` and `state`.
+// Verify the echoed state matches the one you sent BEFORE exchanging the
+// code, and reject the flow on a mismatch (CSRF protection).
 
 let tokens = anon.oauth().exchange_code("the-code", pkce.verifier).await?;
 
