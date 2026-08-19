@@ -1,24 +1,50 @@
-//! Rust bindings for accessing the spoo.me API
-//!
-//! This crate provides a client that can access all endpoints provided by spoo.me, with support for self hosted instances of it.
-//!
-//! <br>
-//!
-//! # Features
-//! - `blocking`: Enables blocking methods for the client, allowing synchronous calls to the API.
-//! - `custom_url`: Allows setting a custom base URL for the client, useful for self-hosted instances of spoo.me.
-
+#![doc = include_str!("../README.md")]
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
-/// A client for the URL shortener API.
-pub mod client;
+mod client;
+mod error;
+mod http;
+mod page;
+mod patch;
 
-/// Errors related to a request.
-pub mod errors;
+pub mod resources;
 
-/// Requests and responses for the URL shortener API.
-pub mod requests;
+/// Sign in with Spoo: PKCE, device-code exchange, refreshing sessions.
+#[cfg(feature = "oauth")]
+pub mod oauth;
 
-/// Tools for validating and formatting requests.
-pub mod utils;
+pub use client::{Client, ClientBuilder, DEFAULT_BASE_URL};
+pub use error::{ApiError, Error, RateLimit};
+pub use page::Page;
+#[cfg(feature = "stream")]
+pub use page::PageStream;
+pub use patch::Patch;
+
+pub use resources::auth::{AuthProvider, AuthResource, ProfilePicture, User};
+pub use resources::emoji::{Emoji, EmojiEntry, EmojiSet};
+pub use resources::links::{
+    AliasCheck, AliasIssue, AliasKind, BulkErrorCode, BulkOutcome, BulkResult, BulkSummary,
+    CheckAliasBuilder, ClaimOutcome, ClaimRequest, ClaimResult, ClaimStatus, CreateLinkBuilder,
+    DeletedLink, DomainPurge, Link, LinkItem, LinkStatus, Links, ListLinksBuilder, MetaTags,
+    MetaTagsInfo, SettableStatus, SortBy, SortOrder, UpdateLinkBuilder, UpdatedLink,
+};
+pub use resources::public::{
+    Generation, Preview, PreviewDestination, PreviewGeoDestination, Public, PublicLinkFacts,
+    PublicStats, PublicStatsBuilder, PublicStatus,
+};
+pub use resources::stats::{
+    AccountStatsBuilder, ComputedMetrics, Dimension, Export, ExportBuilder, ExportFormat,
+    FilterDimension, LinkStatsBuilder, LinkStatsReport, Metric, Scope, Stats, StatsReport, Summary,
+    TimeBucketInfo, TimeRange,
+};
