@@ -76,6 +76,17 @@ jobs:
       - run: cargo check --target wasm32-unknown-unknown --features oauth
         env:
           RUSTFLAGS: -D warnings --cfg getrandom_backend="wasm_js"
+      # Compile checks cannot catch a runtime panic on the target, so the
+      # crate also runs in a real browser against a scripted mock API.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - name: Start the scripted mock API
+        run: |
+          python3 scripts/wasm-mock.py &
+          sleep 1
+      - name: Runtime tests in headless Chrome
+        run: wasm-pack test --headless --chrome --test wasm
 
   docs:
     runs-on: ubuntu-latest

@@ -18,7 +18,7 @@ println!("{}", link.short_url); // https://spoo.me/launch
 # }
 ```
 
-- Async-first on `reqwest` with rustls; compiles for wasm32 (checked in CI)
+- Async-first on `reqwest` with rustls; wasm32 supported (compile-checked and runtime-tested in a headless browser in CI)
 - Typed errors, automatic retries, streaming pagination and exports
 - Timestamps in and out as `chrono::DateTime<Utc>`, whatever the wire format
 - Anonymous, API key, and Sign in with Spoo authentication
