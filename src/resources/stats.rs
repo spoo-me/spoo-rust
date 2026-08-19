@@ -378,7 +378,8 @@ struct QueryCore {
     group_by: Vec<Dimension>,
     metrics: Vec<Metric>,
     timezone: Option<String>,
-    filters: HashMap<&'static str, Vec<String>>,
+    // BTreeMap so the serialized filters JSON has a stable key order.
+    filters: std::collections::BTreeMap<&'static str, Vec<String>>,
 }
 
 impl QueryCore {

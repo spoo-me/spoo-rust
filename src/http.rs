@@ -209,6 +209,7 @@ fn retryable_status(method: &Method, status: StatusCode) -> bool {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn retryable_transport(method: &Method, err: &reqwest::Error) -> bool {
     if idempotent(method) {
         err.is_connect() || err.is_timeout() || err.is_request()
@@ -218,6 +219,15 @@ fn retryable_transport(method: &Method, err: &reqwest::Error) -> bool {
         // the one case where nothing was sent.
         err.is_connect()
     }
+}
+
+// On wasm the host runtime owns connections and reqwest exposes no error
+// classification, so nothing distinguishes "never sent" from "maybe
+// processed". Transport failures surface immediately; status-based retries
+// still apply.
+#[cfg(target_arch = "wasm32")]
+fn retryable_transport(_method: &Method, _err: &reqwest::Error) -> bool {
+    false
 }
 
 fn idempotent(method: &Method) -> bool {
