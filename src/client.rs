@@ -1,618 +1,303 @@
-/// A client for the URL shortener API.
-use crate::{
-    errors::{ApiError, UrlShortenerError, ValidationError},
-    requests::{
-        EmojiRequest, EmojiResponse, ExportRequest, ExportResponse, ShortenRequest,
-        ShortenResponse, StatsRequest, StatsResponse,
-    },
-    utils::{is_valid_alias, is_valid_max_clicks, is_valid_password, is_valid_url},
+//! The client and its builder.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use reqwest::Method;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+use crate::error::Error;
+use crate::http::{Auth, RequestSpec, Transport};
+use crate::resources::{
+    auth::AuthResource, emoji::Emoji, links::Links, public::Public, stats::Stats,
 };
 
-/// A client for the URL shortener API.
+/// Default production endpoint.
+pub const DEFAULT_BASE_URL: &str = "https://spoo.me";
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_MAX_RETRIES: u32 = 2;
+
+/// The spoo.me API client.
 ///
-/// This client can be used in both async and blocking modes, depending on the feature flags.
+/// Cheap to clone (`Arc` inside) and safe to share across tasks.
 ///
-/// # Example usage:
-/// ```rust
-/// use spoo_me::client::UrlShortenerClient;
-/// use spoo_me::requests::ShortenRequest;
-/// use spoo_me::errors::UrlShortenerError;
-///
-/// #[cfg(not(feature = "blocking"))]
-/// #[tokio::main]
-/// async fn main() -> Result<(), UrlShortenerError> {
-///     let client = UrlShortenerClient::new();
-///     let request = ShortenRequest::new("https://example.com/long/url")
-///         .password("Example@123")
-///         .max_clicks(100)
-///         .block_bots(true);
-///
-///     let response = client.shorten(request).await?;
-///     println!("Shortened URL: {}", response.short_url);
-///     Ok(())
-/// }
-///
-/// #[cfg(feature = "blocking")]
-/// fn main() -> Result<(), UrlShortenerError> {
-///     let client = UrlShortenerClient::new();
-///     let request = ShortenRequest::new("https://example.com/long/url")
-///         .password("Example@123")
-///         .max_clicks(100)
-///         .block_bots(true);
-///
-///     let response = client.shorten_blocking(request)?;
-///     println!("Shortened URL: {}", response.short_url);
-///     Ok(())
-/// }
-#[derive(Debug, Clone)]
-pub struct UrlShortenerClient {
-    base_url: String,
-    #[cfg(not(feature = "blocking"))]
-    client: reqwest::Client,
-    #[cfg(feature = "blocking")]
-    client: reqwest::blocking::Client,
+/// ```no_run
+/// # async fn run() -> Result<(), spoo_me::Error> {
+/// let client = spoo_me::Client::new("spoo_your_api_key");
+/// let link = client.links().create("https://example.com/launch").send().await?;
+/// println!("{}", link.short_url);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone)]
+pub struct Client {
+    pub(crate) transport: Arc<Transport>,
+    pub(crate) emoji_cache: Arc<std::sync::Mutex<Option<crate::resources::emoji::CachedSet>>>,
 }
 
-impl UrlShortenerClient {
-    /// Create a new client
-    pub fn new() -> Self {
-        UrlShortenerClient {
-            base_url: "https://spoo.me".to_string(),
-            #[cfg(not(feature = "blocking"))]
-            client: reqwest::Client::new(),
-            #[cfg(feature = "blocking")]
-            client: reqwest::blocking::Client::new(),
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("base_url", &self.transport.base_url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Client {
+    /// A client authenticating with an API key (`spoo_...`).
+    pub fn new(api_key: impl Into<String>) -> Client {
+        Client::builder().api_key(api_key).build_unchecked()
+    }
+
+    /// A client with no credentials, for the public endpoints (anonymous
+    /// shortening, public stats, previews, the emoji set).
+    pub fn anonymous() -> Client {
+        Client::builder().build_unchecked()
+    }
+
+    /// A client reading its API key from the `SPOO_API_KEY` environment
+    /// variable. Environment access happens here and nowhere else: the
+    /// constructors never read configuration you did not ask for.
+    pub fn from_env() -> Result<Client, Error> {
+        match std::env::var("SPOO_API_KEY") {
+            Ok(key) if !key.is_empty() => Ok(Client::new(key)),
+            _ => Err(Error::Config(
+                "SPOO_API_KEY is not set; pass a key to Client::new instead".into(),
+            )),
         }
     }
 
-    /// Create a new client with a custom base URL
-    ///
-    /// Requires the `custom_url` feature to be enabled.
-    #[cfg(feature = "custom_url")]
-    pub fn new_with_base_url<S: Into<String>>(url: S) -> Self {
-        UrlShortenerClient {
-            base_url: url.into(),
-            #[cfg(not(feature = "blocking"))]
-            client: reqwest::Client::new(),
-            #[cfg(feature = "blocking")]
-            client: reqwest::blocking::Client::new(),
+    /// Start configuring a client.
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::default()
+    }
+
+    /// Link management: create, list, update, delete, bulk operations,
+    /// claiming anonymous links.
+    pub fn links(&self) -> Links {
+        Links {
+            client: self.clone(),
         }
     }
 
-    /// Set a custom base URL for the client.
-    ///
-    /// Requires the `custom_url` feature to be enabled.
-    #[cfg(feature = "custom_url")]
-    pub fn set_base_url<T: Into<String>>(&mut self, url: T) {
-        self.base_url = url.into();
+    /// Click statistics and exports.
+    pub fn stats(&self) -> Stats {
+        Stats {
+            client: self.clone(),
+        }
     }
 
-    /// Shorten a URL (async mode).
-    #[cfg(not(feature = "blocking"))]
-    pub async fn shorten(&self, req: ShortenRequest) -> Result<ShortenResponse, UrlShortenerError> {
-        if let Some(ref pw) = req.password {
-            if !is_valid_password(pw) {
-                return Err(UrlShortenerError::Validation(
-                    ValidationError::InvalidPasswordFormat(pw.clone()),
-                ));
-            }
+    /// Public, unauthenticated link surfaces: stats pages and previews.
+    pub fn public(&self) -> Public {
+        Public {
+            client: self.clone(),
         }
-
-        #[cfg(feature = "custom_url")]
-        if !is_valid_url(&req.url, &self.base_url) {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidUrlFormat(req.url.clone()),
-            ));
-        }
-        #[cfg(not(feature = "custom_url"))]
-        if !is_valid_url(&req.url) {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidUrlFormat(req.url.clone()),
-            ));
-        }
-
-        if let Some(ref alias) = req.alias {
-            if !is_valid_alias(alias) {
-                return Err(UrlShortenerError::Validation(
-                    ValidationError::InvalidAliasFormat(alias.clone()),
-                ));
-            }
-        }
-
-        if let Some(max_clicks) = req.max_clicks {
-            if !is_valid_max_clicks(max_clicks) {
-                return Err(UrlShortenerError::Validation(
-                    ValidationError::InvalidMaxClicks(max_clicks),
-                ));
-            }
-        }
-
-        let resp = self
-            .client
-            .post(format!("{}/", self.base_url))
-            .header("Accept", "application/json")
-            .form(&req)
-            .send()
-            .await
-            .map_err(UrlShortenerError::Http)?;
-
-        let status = resp.status();
-        let text = resp.text().await.map_err(UrlShortenerError::Http)?;
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                return Err(UrlShortenerError::Api(ApiError::RateLimitExceeded));
-            }
-
-            if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(err) = err_json.get("error").and_then(|e| e.as_str()) {
-                    return Err(UrlShortenerError::Api(match err {
-                        "UrlError" => ApiError::UrlError,
-                        "AliasError" => ApiError::AliasError,
-                        "PasswordError" => ApiError::PasswordError,
-                        "MaxClicksError" => ApiError::MaxClicksError,
-                        "EmojiError" => ApiError::EmojiError,
-                        _ => ApiError::UrlError,
-                    }));
-                }
-            }
-            return Err(UrlShortenerError::Other(text));
-        }
-
-        let result =
-            serde_json::from_str::<ShortenResponse>(&text).map_err(UrlShortenerError::Json)?;
-
-        Ok(result)
     }
 
-    /// Shorten a URL (blocking mode).
-    #[cfg(feature = "blocking")]
-    pub fn shorten_blocking(
+    /// The emoji-alias catalogue and its policy caps.
+    pub fn emoji(&self) -> Emoji {
+        Emoji {
+            client: self.clone(),
+        }
+    }
+
+    /// Identity: who this client is signed in as.
+    pub fn auth(&self) -> AuthResource {
+        AuthResource {
+            client: self.clone(),
+        }
+    }
+
+    /// Sign in with Spoo: device-code exchange and refreshing sessions.
+    #[cfg(feature = "oauth")]
+    pub fn oauth(&self) -> crate::oauth::OAuth {
+        crate::oauth::OAuth {
+            client: self.clone(),
+        }
+    }
+
+    /// Raw typed `GET` with the client's auth, retries, timeout and error
+    /// mapping applied: the supported pressure valve for endpoints this SDK
+    /// does not cover yet. Needing it is a signal worth an issue on the SDK.
+    pub async fn get<T: DeserializeOwned>(
         &self,
-        req: ShortenRequest,
-    ) -> Result<ShortenResponse, UrlShortenerError> {
-        if let Some(ref pw) = req.password {
-            if !is_valid_password(pw) {
-                return Err(UrlShortenerError::Validation(
-                    ValidationError::InvalidPasswordFormat(pw.clone()),
-                ));
-            }
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<T, Error> {
+        let mut spec = RequestSpec::new(Method::GET, path);
+        for (key, value) in query {
+            spec.query.push(((*key).to_owned(), (*value).to_owned()));
         }
-
-        #[cfg(feature = "custom_url")]
-        if !is_valid_url(&req.url, &self.base_url) {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidUrlFormat(req.url.clone()),
-            ));
-        }
-        #[cfg(not(feature = "custom_url"))]
-        if !is_valid_url(&req.url) {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidUrlFormat(req.url.clone()),
-            ));
-        }
-
-        if let Some(ref alias) = req.alias {
-            if !is_valid_alias(alias) {
-                return Err(UrlShortenerError::Validation(
-                    ValidationError::InvalidAliasFormat(alias.clone()),
-                ));
-            }
-        }
-
-        if let Some(max_clicks) = req.max_clicks {
-            if !is_valid_max_clicks(max_clicks) {
-                return Err(UrlShortenerError::Validation(
-                    ValidationError::InvalidMaxClicks(max_clicks),
-                ));
-            }
-        }
-
-        let resp = self
-            .client
-            .post(format!("{}/", self.base_url))
-            .header("Accept", "application/json")
-            .form(&req)
-            .send()
-            .map_err(UrlShortenerError::Http)?;
-
-        let status = resp.status();
-        let text = resp.text().map_err(UrlShortenerError::Http)?;
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                return Err(UrlShortenerError::Api(ApiError::RateLimitExceeded));
-            }
-
-            if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(err) = err_json.get("error").and_then(|e| e.as_str()) {
-                    return Err(UrlShortenerError::Api(match err {
-                        "UrlError" => ApiError::UrlError,
-                        "AliasError" => ApiError::AliasError,
-                        "PasswordError" => ApiError::PasswordError,
-                        "MaxClicksError" => ApiError::MaxClicksError,
-                        "EmojiError" => ApiError::EmojiError,
-                        _ => ApiError::UrlError,
-                    }));
-                }
-            }
-            return Err(UrlShortenerError::Other(text));
-        }
-
-        let result =
-            serde_json::from_str::<ShortenResponse>(&text).map_err(UrlShortenerError::Json)?;
-
-        Ok(result)
+        self.transport.execute(spec).await
     }
 
-    /// Create an emoji URL (async mode).
-    #[cfg(not(feature = "blocking"))]
-    pub async fn emoji(&self, req: EmojiRequest) -> Result<EmojiResponse, UrlShortenerError> {
-        if let Some(ref pw) = req.password {
-            if !is_valid_password(pw) {
-                return Err(UrlShortenerError::Validation(
-                    ValidationError::InvalidPasswordFormat(pw.clone()),
-                ));
-            }
-        }
-
-        #[cfg(feature = "custom_url")]
-        if !is_valid_url(&req.url, &self.base_url) {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidUrlFormat(req.url.clone()),
-            ));
-        }
-        #[cfg(not(feature = "custom_url"))]
-        if !is_valid_url(&req.url) {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidUrlFormat(req.url.clone()),
-            ));
-        }
-
-        if let Some(max_clicks) = req.max_clicks {
-            if !is_valid_max_clicks(max_clicks) {
-                return Err(UrlShortenerError::Validation(
-                    ValidationError::InvalidMaxClicks(max_clicks),
-                ));
-            }
-        }
-
-        let resp = self
-            .client
-            .post(format!("{}/emoji", self.base_url))
-            .header("Accept", "application/json")
-            .form(&req)
-            .send()
-            .await
-            .map_err(UrlShortenerError::Http)?;
-
-        let status = resp.status();
-        let text = resp.text().await.map_err(UrlShortenerError::Http)?;
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                return Err(UrlShortenerError::Api(ApiError::RateLimitExceeded));
-            }
-
-            if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(err) = err_json.get("error").and_then(|e| e.as_str()) {
-                    return Err(UrlShortenerError::Api(match err {
-                        "UrlError" => ApiError::UrlError,
-                        "AliasError" => ApiError::AliasError,
-                        "PasswordError" => ApiError::PasswordError,
-                        "MaxClicksError" => ApiError::MaxClicksError,
-                        "EmojiError" => ApiError::EmojiError,
-                        err => ApiError::Other(err.to_string()),
-                    }));
-                }
-            }
-            return Err(UrlShortenerError::Other(text));
-        }
-
-        let result =
-            serde_json::from_str::<EmojiResponse>(&text).map_err(UrlShortenerError::Json)?;
-
-        Ok(result)
+    /// Raw typed `POST`. See [`Client::get`].
+    pub async fn post<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> Result<T, Error> {
+        let spec = RequestSpec::new(Method::POST, path).json(body)?;
+        self.transport.execute(spec).await
     }
 
-    /// Create an emoji URL (blocking mode).
-    #[cfg(feature = "blocking")]
-    pub fn emoji_blocking(&self, req: EmojiRequest) -> Result<EmojiResponse, UrlShortenerError> {
-        if let Some(ref pw) = req.password {
-            if !is_valid_password(pw) {
-                return Err(UrlShortenerError::Validation(
-                    ValidationError::InvalidPasswordFormat(pw.clone()),
-                ));
-            }
-        }
-
-        #[cfg(feature = "custom_url")]
-        if !is_valid_url(&req.url, &self.base_url) {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidUrlFormat(req.url.clone()),
-            ));
-        }
-        #[cfg(not(feature = "custom_url"))]
-        if !is_valid_url(&req.url) {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidUrlFormat(req.url.clone()),
-            ));
-        }
-
-        if let Some(max_clicks) = req.max_clicks {
-            if !is_valid_max_clicks(max_clicks) {
-                return Err(UrlShortenerError::Validation(
-                    ValidationError::InvalidMaxClicks(max_clicks),
-                ));
-            }
-        }
-
-        let resp = self
-            .client
-            .post(format!("{}/emoji", self.base_url))
-            .header("Accept", "application/json")
-            .form(&req)
-            .send()
-            .map_err(UrlShortenerError::Http)?;
-
-        let status = resp.status();
-        let text = resp.text().map_err(UrlShortenerError::Http)?;
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                return Err(UrlShortenerError::Api(ApiError::RateLimitExceeded));
-            }
-
-            if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(err) = err_json.get("error").and_then(|e| e.as_str()) {
-                    return Err(UrlShortenerError::Api(match err {
-                        "UrlError" => ApiError::UrlError,
-                        "AliasError" => ApiError::AliasError,
-                        "PasswordError" => ApiError::PasswordError,
-                        "MaxClicksError" => ApiError::MaxClicksError,
-                        "EmojiError" => ApiError::EmojiError,
-                        _ => ApiError::UrlError,
-                    }));
-                }
-            }
-            return Err(UrlShortenerError::Other(text));
-        }
-
-        let result =
-            serde_json::from_str::<EmojiResponse>(&text).map_err(UrlShortenerError::Json)?;
-
-        Ok(result)
+    /// Raw typed `PATCH`. See [`Client::get`].
+    pub async fn patch<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> Result<T, Error> {
+        let spec = RequestSpec::new(Method::PATCH, path).json(body)?;
+        self.transport.execute(spec).await
     }
 
-    /// Get statistics for a shortened URL (async mode).
-    #[cfg(not(feature = "blocking"))]
-    pub async fn stats(&self, req: StatsRequest) -> Result<StatsResponse, UrlShortenerError> {
-        if req.short_code.is_empty() {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidPasswordFormat("Short code cannot be empty".to_string()),
-            ));
-        }
-
-        if let Some(ref pw) = req.password {
-            if !is_valid_password(pw) {
-                return Err(UrlShortenerError::Validation(
-                    ValidationError::InvalidPasswordFormat(pw.clone()),
-                ));
-            }
-        }
-
-        if !is_valid_alias(&req.short_code) {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidAliasFormat(req.short_code.clone()),
-            ));
-        }
-
-        let resp = self
-            .client
-            .post(format!("{}/stats/{}", self.base_url, req.short_code))
-            .header("Accept", "application/json")
-            .form(&req)
-            .send()
-            .await
-            .map_err(UrlShortenerError::Http)?;
-
-        let status = resp.status();
-        let text = resp.text().await.map_err(UrlShortenerError::Http)?;
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                return Err(UrlShortenerError::Api(ApiError::RateLimitExceeded));
-            }
-
-            if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(err) = err_json.get("error").and_then(|e| e.as_str()) {
-                    return Err(UrlShortenerError::Api(match err {
-                        "UrlError" => ApiError::UrlError,
-                        "AliasError" => ApiError::AliasError,
-                        "PasswordError" => ApiError::PasswordError,
-                        "MaxClicksError" => ApiError::MaxClicksError,
-                        "EmojiError" => ApiError::EmojiError,
-                        _ => ApiError::UrlError,
-                    }));
-                }
-            }
-            return Err(UrlShortenerError::Other(text));
-        }
-
-        let result =
-            serde_json::from_str::<StatsResponse>(&text).map_err(UrlShortenerError::Json)?;
-
-        Ok(result)
-    }
-
-    /// Get statistics for a shortened URL (blocking mode).
-    #[cfg(feature = "blocking")]
-    pub fn stats_blocking(&self, req: StatsRequest) -> Result<StatsResponse, UrlShortenerError> {
-        if req.short_code.is_empty() {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidPasswordFormat("Short code cannot be empty".to_string()),
-            ));
-        }
-
-        if let Some(ref pw) = req.password {
-            if !is_valid_password(pw) {
-                return Err(UrlShortenerError::Validation(
-                    ValidationError::InvalidPasswordFormat(pw.clone()),
-                ));
-            }
-        }
-
-        if !is_valid_alias(&req.short_code) {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidAliasFormat(req.short_code.clone()),
-            ));
-        }
-
-        let resp = self
-            .client
-            .post(format!("{}/stats/{}", self.base_url, req.short_code))
-            .header("Accept", "application/json")
-            .form(&req)
-            .send()
-            .map_err(UrlShortenerError::Http)?;
-
-        let status = resp.status();
-        let text = resp.text().map_err(UrlShortenerError::Http)?;
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                return Err(UrlShortenerError::Api(ApiError::RateLimitExceeded));
-            }
-
-            if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(err) = err_json.get("error").and_then(|e| e.as_str()) {
-                    return Err(UrlShortenerError::Api(match err {
-                        "UrlError" => ApiError::UrlError,
-                        "AliasError" => ApiError::AliasError,
-                        "PasswordError" => ApiError::PasswordError,
-                        "MaxClicksError" => ApiError::MaxClicksError,
-                        "EmojiError" => ApiError::EmojiError,
-                        _ => ApiError::UrlError,
-                    }));
-                }
-            }
-            return Err(UrlShortenerError::Other(text));
-        }
-
-        let result =
-            serde_json::from_str::<StatsResponse>(&text).map_err(UrlShortenerError::Json)?;
-
-        Ok(result)
-    }
-
-    /// Export data for a shortened URL (async mode).
-    #[cfg(not(feature = "blocking"))]
-    pub async fn export(&self, req: ExportRequest) -> Result<ExportResponse, UrlShortenerError> {
-        if req.short_code.is_empty() {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidAliasFormat(req.short_code),
-            ));
-        }
-
-        if !is_valid_alias(&req.short_code) {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidAliasFormat(req.short_code.clone()),
-            ));
-        }
-
-        let resp = self
-            .client
-            .post(format!(
-                "{}/export/{}/{}",
-                self.base_url, req.short_code, req.export_format
-            ))
-            .form(&req)
-            .send()
-            .await
-            .map_err(UrlShortenerError::Http)?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                return Err(UrlShortenerError::Api(ApiError::RateLimitExceeded));
-            }
-
-            let text = resp.text().await.map_err(UrlShortenerError::Http)?;
-            if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(err) = err_json.get("error").and_then(|e| e.as_str()) {
-                    return Err(UrlShortenerError::Api(match err {
-                        "UrlError" => ApiError::UrlError,
-                        "AliasError" => ApiError::AliasError,
-                        "PasswordError" => ApiError::PasswordError,
-                        "MaxClicksError" => ApiError::MaxClicksError,
-                        "EmojiError" => ApiError::EmojiError,
-                        _ => ApiError::Other(err.to_string()),
-                    }));
-                }
-            }
-            return Err(UrlShortenerError::Other(text));
-        }
-
-        let data = resp.bytes().await.map_err(UrlShortenerError::Http)?;
-        let result = ExportResponse {
-            data: data.to_vec(),
-        };
-
-        Ok(result)
-    }
-
-    /// Export data for a shortened URL (blocking mode).
-    #[cfg(feature = "blocking")]
-    pub fn export_blocking(&self, req: ExportRequest) -> Result<ExportResponse, UrlShortenerError> {
-        if req.short_code.is_empty() {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidAliasFormat(req.short_code),
-            ));
-        }
-
-        if !is_valid_alias(&req.short_code) {
-            return Err(UrlShortenerError::Validation(
-                ValidationError::InvalidAliasFormat(req.short_code.clone()),
-            ));
-        }
-
-        let resp = self
-            .client
-            .post(format!(
-                "{}/export/{}/{}",
-                self.base_url, req.short_code, req.export_format
-            ))
-            .form(&req)
-            .send()
-            .map_err(UrlShortenerError::Http)?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            if status.as_u16() == 429 {
-                return Err(UrlShortenerError::Api(ApiError::RateLimitExceeded));
-            }
-
-            let text = resp.text().map_err(UrlShortenerError::Http)?;
-            if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(err) = err_json.get("error").and_then(|e| e.as_str()) {
-                    return Err(UrlShortenerError::Api(match err {
-                        "UrlError" => ApiError::UrlError,
-                        "AliasError" => ApiError::AliasError,
-                        "PasswordError" => ApiError::PasswordError,
-                        "MaxClicksError" => ApiError::MaxClicksError,
-                        "EmojiError" => ApiError::EmojiError,
-                        _ => ApiError::Other(err.to_string()),
-                    }));
-                }
-            }
-            return Err(UrlShortenerError::Other(text));
-        }
-
-        let data = resp.bytes().map_err(UrlShortenerError::Http)?;
-        let result = ExportResponse {
-            data: data.to_vec(),
-        };
-
-        Ok(result)
+    /// Raw typed `DELETE`. See [`Client::get`].
+    pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
+        let spec = RequestSpec::new(Method::DELETE, path);
+        self.transport.execute(spec).await
     }
 }
 
-impl Default for UrlShortenerClient {
-    fn default() -> Self {
-        Self::new()
+/// Configures and builds a [`Client`].
+#[derive(Default)]
+pub struct ClientBuilder {
+    api_key: Option<String>,
+    #[cfg(feature = "oauth")]
+    session: Option<Arc<crate::oauth::Session>>,
+    base_url: Option<String>,
+    http_client: Option<reqwest::Client>,
+    max_retries: Option<u32>,
+    timeout: Option<Duration>,
+    client_tag: Option<String>,
+}
+
+impl ClientBuilder {
+    /// Authenticate with an API key (`spoo_...`).
+    pub fn api_key(mut self, key: impl Into<String>) -> Self {
+        self.api_key = Some(key.into());
+        self
+    }
+
+    /// Authenticate with a refreshing Sign in with Spoo session.
+    #[cfg(feature = "oauth")]
+    pub fn session(mut self, session: Arc<crate::oauth::Session>) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Point at a self-hosted instance instead of `https://spoo.me`.
+    pub fn base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = Some(url.into());
+        self
+    }
+
+    /// Inject a configured `reqwest::Client` (shared connection pool,
+    /// proxies, custom TLS).
+    pub fn http_client(mut self, client: reqwest::Client) -> Self {
+        self.http_client = Some(client);
+        self
+    }
+
+    /// Retries after the first attempt. Default 2.
+    pub fn max_retries(mut self, retries: u32) -> Self {
+        self.max_retries = Some(retries);
+        self
+    }
+
+    /// Per-request timeout. Default 30 seconds. Ignored on wasm, where the
+    /// host runtime owns request lifetimes.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Override the `X-Spoo-Client` identification header, e.g.
+    /// `"my-app/1.0"`. Defaults to this SDK's own tag.
+    pub fn client_tag(mut self, tag: impl Into<String>) -> Self {
+        self.client_tag = Some(tag.into());
+        self
+    }
+
+    /// Build the client, validating configuration.
+    pub fn build(self) -> Result<Client, Error> {
+        if let Some(url) = &self.base_url {
+            let parsed = reqwest::Url::parse(url)
+                .map_err(|e| Error::Config(format!("base_url {url:?} is not a valid URL: {e}")))?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err(Error::Config(format!(
+                    "base_url must use http or https, got {url:?}"
+                )));
+            }
+            if parsed.host_str().is_none() {
+                return Err(Error::Config(format!("base_url {url:?} has no host")));
+            }
+        }
+        Ok(self.build_unchecked())
+    }
+
+    fn build_unchecked(self) -> Client {
+        let auth = {
+            #[cfg(feature = "oauth")]
+            if let Some(session) = self.session {
+                Auth::Session(session)
+            } else if let Some(key) = self.api_key {
+                Auth::ApiKey(key)
+            } else {
+                Auth::None
+            }
+            #[cfg(not(feature = "oauth"))]
+            if let Some(key) = self.api_key {
+                Auth::ApiKey(key)
+            } else {
+                Auth::None
+            }
+        };
+        let base_url = self
+            .base_url
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned())
+            .trim_end_matches('/')
+            .to_owned();
+        let transport = Transport {
+            injected_http: self.http_client,
+            lazy_http: std::sync::OnceLock::new(),
+            base_url,
+            auth,
+            client_tag: self
+                .client_tag
+                .unwrap_or_else(|| format!("sdk-rust/{}", env!("CARGO_PKG_VERSION"))),
+            max_retries: self.max_retries.unwrap_or(DEFAULT_MAX_RETRIES),
+            timeout: self.timeout.unwrap_or(DEFAULT_TIMEOUT),
+        };
+        Client {
+            transport: Arc::new(transport),
+            emoji_cache: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_is_send_sync_clone() {
+        fn assert_traits<T: Send + Sync + Clone>() {}
+        assert_traits::<Client>();
+    }
+
+    #[test]
+    fn builder_rejects_bad_base_url() {
+        assert!(Client::builder().base_url("spoo.me").build().is_err());
+        assert!(Client::builder().base_url("http://").build().is_err());
+        assert!(Client::builder().base_url("https://?").build().is_err());
+        assert!(Client::builder().base_url("ftp://spoo.me").build().is_err());
+        assert!(
+            Client::builder()
+                .base_url("https://spoo.me/")
+                .build()
+                .is_ok()
+        );
     }
 }
