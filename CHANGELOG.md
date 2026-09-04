@@ -1,6 +1,21 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.3.0
+
+- Link tags. `client.tags()` lists, creates, updates and deletes the
+  account's tags; each has a name, a `TagColor` and a `TagIcon`, and an
+  unknown server key decodes as `Other(String)` so a new icon still reaches
+  the caller.
+- `tag_ids(..)` on link create and update, `clear_tags()` on update, and
+  `tags: Vec<TagRef>` on `Link`, `LinkItem` and `UpdatedLink`.
+- Listing filters `tag_ids`, `tag_names` and `tags_match`; `tag_names` and
+  `tag_ids` on account stats and the account export.
+- `links().bulk_update_tags(ids, add, remove)` for `POST /api/v1/urls/bulk/tags`.
+- The export builder is split into `AccountExportBuilder` and
+  `LinkExportBuilder` so the per-link route is never handed a filter it
+  drops. `ExportBuilder` stays as an alias of the account one.
+
+## 0.2.0
 
 Rewrite against the spoo.me v1 API. Every endpoint the 0.1.x crate called
 was removed in the platform's v1 overhaul, so this is a clean break; see
@@ -13,9 +28,6 @@ errors, documentation on every public item.
   delete/status/expiry/domain, claiming anonymous links, account and
   per-link statistics, streaming exports, public stats and previews, the
   emoji catalogue (ETag-cached), identity read.
-- Link tags: the `tags()` resource (list/create/update/delete), `tag_ids`
-  on link create and update, tag filters on listings, stats and exports,
-  and `bulk_update_tags()`.
 - Authentication: API keys, anonymous mode, and Sign in with Spoo behind
   the `oauth` feature (PKCE, device-code exchange, self-refreshing
   single-flight sessions).

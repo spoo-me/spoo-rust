@@ -1,6 +1,6 @@
 [package]
 name = "spoo-me"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["spoo.me", "rdni"]
 description = "Official Rust SDK for the spoo.me URL shortener API"
 edition = "2024"
