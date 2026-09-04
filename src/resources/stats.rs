@@ -350,20 +350,19 @@ impl Stats {
     /// Download the account-wide export. Only this aggregate route carries
     /// the account-level slicers; per-link downloads with per-link filenames
     /// come from [`Stats::export_link`].
-    pub fn export(&self) -> ExportBuilder {
-        ExportBuilder {
+    pub fn export(&self) -> AccountExportBuilder {
+        AccountExportBuilder {
             client: self.client.clone(),
-            path: "/api/v1/export".to_owned(),
             format: None,
             core: QueryCore::default(),
         }
     }
 
     /// Download one link's export, named after the link by the server.
-    pub fn export_link(&self, url_id: impl Into<String>) -> ExportBuilder {
-        ExportBuilder {
+    pub fn export_link(&self, url_id: impl Into<String>) -> LinkExportBuilder {
+        LinkExportBuilder {
             client: self.client.clone(),
-            path: format!("/api/v1/export/links/{}", encode_segment(&url_id.into())),
+            url_id: url_id.into(),
             format: None,
             core: QueryCore::default(),
         }
@@ -383,6 +382,17 @@ struct QueryCore {
 }
 
 impl QueryCore {
+    fn add_filter<I, S>(&mut self, key: &'static str, values: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.filters
+            .entry(key)
+            .or_default()
+            .extend(values.into_iter().map(Into::into));
+    }
+
     fn apply(self, mut spec: RequestSpec) -> Result<RequestSpec, Error> {
         spec = spec
             .query("start_date", self.start_date)
@@ -455,11 +465,7 @@ macro_rules! stats_query_methods {
             I: IntoIterator<Item = S>,
             S: Into<String>,
         {
-            self.core
-                .filters
-                .entry(dimension.as_str())
-                .or_default()
-                .extend(values.into_iter().map(Into::into));
+            self.core.add_filter(dimension.as_str(), values);
             self
         }
     };
@@ -495,6 +501,28 @@ impl AccountStatsBuilder {
         S: Into<String>,
     {
         self.url_ids.extend(ids.into_iter().map(Into::into));
+        self
+    }
+
+    /// Slice the aggregate to clicks on links carrying at least one of
+    /// these tags, by name. Resolved to links at query time, so a tag added
+    /// today covers the link's whole click history. Repeatable.
+    pub fn tag_names<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.core.add_filter("tag", names);
+        self
+    }
+
+    /// Same as [`AccountStatsBuilder::tag_names`], by tag id. Repeatable.
+    pub fn tag_ids<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.core.add_filter("tag_id", ids);
         self
     }
 
@@ -534,16 +562,69 @@ impl LinkStatsBuilder {
     }
 }
 
-/// Builder for [`Stats::export`] and [`Stats::export_link`].
+/// Builder for [`Stats::export`].
 #[must_use = "builders do nothing until .send() is awaited"]
-pub struct ExportBuilder {
+pub struct AccountExportBuilder {
     client: Client,
-    path: String,
     format: Option<ExportFormat>,
     core: QueryCore,
 }
 
-impl ExportBuilder {
+impl AccountExportBuilder {
+    stats_query_methods!();
+
+    /// File format. Defaults to JSON server-side.
+    pub fn format(mut self, format: ExportFormat) -> Self {
+        self.format = Some(format);
+        self
+    }
+
+    /// Only clicks on links carrying at least one of these tags, by name.
+    /// Repeatable.
+    pub fn tag_names<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.core.add_filter("tag", names);
+        self
+    }
+
+    /// Same as [`AccountExportBuilder::tag_names`], by tag id. Repeatable.
+    pub fn tag_ids<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.core.add_filter("tag_id", ids);
+        self
+    }
+
+    /// Download the export.
+    pub async fn send(self) -> Result<Export, Error> {
+        download(
+            &self.client,
+            "/api/v1/export".to_owned(),
+            self.format,
+            self.core,
+        )
+        .await
+    }
+}
+
+/// The 0.2 name for the account export builder.
+pub type ExportBuilder = AccountExportBuilder;
+
+/// Builder for [`Stats::export_link`].
+#[must_use = "builders do nothing until .send() is awaited"]
+pub struct LinkExportBuilder {
+    client: Client,
+    url_id: String,
+    format: Option<ExportFormat>,
+    core: QueryCore,
+}
+
+impl LinkExportBuilder {
     stats_query_methods!();
 
     /// File format. Defaults to JSON server-side.
@@ -554,32 +635,41 @@ impl ExportBuilder {
 
     /// Download the export.
     pub async fn send(self) -> Result<Export, Error> {
-        let fallback = format!(
-            "spoo-export.{}",
-            self.format.map(ExportFormat::extension).unwrap_or("json")
-        );
-        let spec = self.core.apply(
-            RequestSpec::new(Method::GET, self.path)
-                .query("format", self.format.map(|f| f.as_str().to_owned())),
-        )?;
-        let response = self.client.transport.send(spec).await?;
-        let filename = content_disposition_filename(
-            response
-                .headers()
-                .get("content-disposition")
-                .and_then(|v| v.to_str().ok()),
-            &fallback,
-        );
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_owned();
-        Ok(Export {
-            filename,
-            content_type,
-            response,
-        })
+        let path = format!("/api/v1/export/links/{}", encode_segment(&self.url_id));
+        download(&self.client, path, self.format, self.core).await
     }
+}
+
+async fn download(
+    client: &Client,
+    path: String,
+    format: Option<ExportFormat>,
+    core: QueryCore,
+) -> Result<Export, Error> {
+    let fallback = format!(
+        "spoo-export.{}",
+        format.map(ExportFormat::extension).unwrap_or("json")
+    );
+    let spec = core.apply(
+        RequestSpec::new(Method::GET, path).query("format", format.map(|f| f.as_str().to_owned())),
+    )?;
+    let response = client.transport.send(spec).await?;
+    let filename = content_disposition_filename(
+        response
+            .headers()
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok()),
+        &fallback,
+    );
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    Ok(Export {
+        filename,
+        content_type,
+        response,
+    })
 }

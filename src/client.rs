@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use crate::error::Error;
 use crate::http::{Auth, RequestSpec, Transport};
 use crate::resources::{
-    auth::AuthResource, emoji::Emoji, links::Links, public::Public, stats::Stats,
+    auth::AuthResource, emoji::Emoji, links::Links, public::Public, stats::Stats, tags::Tags,
 };
 
 /// Default production endpoint.
@@ -78,6 +78,13 @@ impl Client {
     /// claiming anonymous links.
     pub fn links(&self) -> Links {
         Links {
+            client: self.clone(),
+        }
+    }
+
+    /// Link tags: the account's tag catalogue.
+    pub fn tags(&self) -> Tags {
+        Tags {
             client: self.clone(),
         }
     }

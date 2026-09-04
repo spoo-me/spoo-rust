@@ -5,3 +5,4 @@ pub mod emoji;
 pub mod links;
 pub mod public;
 pub mod stats;
+pub mod tags;

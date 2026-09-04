@@ -11,6 +11,7 @@ use crate::error::Error;
 use crate::http::{RequestSpec, encode_segment};
 use crate::page::Page;
 use crate::patch::Patch;
+use crate::resources::tags::TagRef;
 
 /// Link management, from [`crate::Client::links`].
 pub struct Links {
@@ -156,6 +157,9 @@ pub struct Link {
     /// Custom social preview, if configured.
     #[serde(default)]
     pub meta_tags: Option<MetaTagsInfo>,
+    /// The link's tags, in the link's order.
+    #[serde(default)]
+    pub tags: Vec<TagRef>,
     /// One-time bearer proof of creation, present only on anonymous
     /// creates and shown exactly once. Store it to later attach the link to
     /// an account via [`Links::claim`].
@@ -210,6 +214,9 @@ pub struct LinkItem {
     /// Custom social preview, if configured.
     #[serde(default)]
     pub meta_tags: Option<MetaTagsInfo>,
+    /// The link's tags, in the link's order.
+    #[serde(default)]
+    pub tags: Vec<TagRef>,
 }
 
 /// The link's state after an update (`PATCH /api/v1/urls/{url_id}`).
@@ -253,6 +260,9 @@ pub struct UpdatedLink {
     /// Custom social preview, if configured.
     #[serde(default)]
     pub meta_tags: Option<MetaTagsInfo>,
+    /// The link's tags, in the link's order.
+    #[serde(default)]
+    pub tags: Vec<TagRef>,
 }
 
 /// Confirmation of a deletion.
@@ -620,6 +630,29 @@ impl Links {
         self.bulk("/api/v1/urls/bulk/domain", ids, extra).await
     }
 
+    /// Add and remove tags, by tag id, on up to 100 links at once. Tags a
+    /// link already carries are kept once; tags it does not carry are
+    /// ignored on removal. A link that would end up over 10 tags fails on
+    /// its own row.
+    pub async fn bulk_update_tags<I, S, A, R, T>(
+        &self,
+        ids: I,
+        add: A,
+        remove: R,
+    ) -> Result<BulkOutcome, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+        A: IntoIterator<Item = T>,
+        R: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        let mut extra = serde_json::Map::new();
+        extra.insert("add".into(), string_list(add));
+        extra.insert("remove".into(), string_list(remove));
+        self.bulk("/api/v1/urls/bulk/tags", ids, extra).await
+    }
+
     async fn bulk<I, S>(
         &self,
         path: &str,
@@ -630,11 +663,7 @@ impl Links {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let ids: Vec<String> = ids.into_iter().map(Into::into).collect();
-        extra.insert(
-            "ids".into(),
-            serde_json::Value::Array(ids.into_iter().map(serde_json::Value::String).collect()),
-        );
+        extra.insert("ids".into(), string_list(ids));
         let spec = RequestSpec::new(Method::POST, path).json(&serde_json::Value::Object(extra))?;
         self.client.transport.execute(spec).await
     }
@@ -675,6 +704,8 @@ struct CreateLinkBody {
     geo_rules: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     meta_tags: Option<MetaTags>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag_ids: Option<Vec<String>>,
 }
 
 /// Builder for [`Links::create`]. Chain options, finish with
@@ -758,6 +789,16 @@ impl CreateLinkBuilder {
         self
     }
 
+    /// Attach tags by id (from [`crate::Tags::list`]), at most 10.
+    pub fn tag_ids<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.body.tag_ids = Some(ids.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Create the link.
     pub async fn send(self) -> Result<Link, Error> {
         let spec = RequestSpec::new(Method::POST, "/api/v1/shorten").json(&self.body)?;
@@ -827,6 +868,25 @@ impl SortOrder {
         match self {
             SortOrder::Ascending => "asc",
             SortOrder::Descending => "desc",
+        }
+    }
+}
+
+/// How several tag filters combine in [`Links::list`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TagsMatch {
+    /// Links carrying at least one of the tags (the default).
+    Any,
+    /// Links carrying every one of the tags.
+    All,
+}
+
+impl TagsMatch {
+    fn as_str(self) -> &'static str {
+        match self {
+            TagsMatch::Any => "any",
+            TagsMatch::All => "all",
         }
     }
 }
@@ -932,6 +992,35 @@ impl ListLinksBuilder {
         self
     }
 
+    /// Only links carrying these tags, by id. Combine with
+    /// [`ListLinksBuilder::tags_match`].
+    pub fn tag_ids<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.filter.insert("tagIds".into(), string_list(ids));
+        self
+    }
+
+    /// Only links carrying these tags, by name. Unknown names match
+    /// nothing.
+    pub fn tag_names<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.filter.insert("tagNames".into(), string_list(names));
+        self
+    }
+
+    /// Whether several tags mean any of them or all of them. Defaults to
+    /// any.
+    pub fn tags_match(mut self, mode: TagsMatch) -> Self {
+        self.filter.insert("tagsMatch".into(), mode.as_str().into());
+        self
+    }
+
     /// Fetch the page.
     pub async fn send(self) -> Result<Page<LinkItem>, Error> {
         let next_template = self.clone();
@@ -954,6 +1043,19 @@ impl ListLinksBuilder {
             .query("domain", self.domain)
             .query("filter", filter))
     }
+}
+
+fn string_list<I, S>(values: I) -> serde_json::Value
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    serde_json::Value::Array(
+        values
+            .into_iter()
+            .map(|v| serde_json::Value::String(v.into()))
+            .collect(),
+    )
 }
 
 fn build_page(wire: ListWire, template: ListLinksBuilder) -> Page<LinkItem> {
@@ -1001,6 +1103,8 @@ struct UpdateLinkBody {
     geo_rules: Patch<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Patch::is_keep")]
     meta_tags: Patch<MetaTags>,
+    #[serde(skip_serializing_if = "Patch::is_keep")]
+    tag_ids: Patch<Vec<String>>,
 }
 
 /// Builder for [`Links::update`]. Untouched fields keep their stored
@@ -1112,6 +1216,23 @@ impl UpdateLinkBuilder {
     /// Remove the custom social preview.
     pub fn remove_meta_tags(mut self) -> Self {
         self.body.meta_tags = Patch::Null;
+        self
+    }
+
+    /// Replace the link's tags with these ids (from [`crate::Tags::list`]),
+    /// at most 10.
+    pub fn tag_ids<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.body.tag_ids = Patch::Set(ids.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Remove every tag from the link.
+    pub fn clear_tags(mut self) -> Self {
+        self.body.tag_ids = Patch::Null;
         self
     }
 

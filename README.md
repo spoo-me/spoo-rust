@@ -152,6 +152,55 @@ for row in &outcome.results {
 # }
 ```
 
+## Tags
+
+Tags live in your account and are attached to links by id. A link carries
+up to 10.
+
+```rust,no_run
+# async fn run(client: spoo_me::Client) -> Result<(), spoo_me::Error> {
+use spoo_me::{TagColor, TagIcon, TagsMatch};
+
+let launch = client
+    .tags()
+    .create("launch")
+    .color(TagColor::Violet)
+    .icon(TagIcon::Rocket)
+    .send()
+    .await?;
+
+// Tag a link on create, or replace its tags on update (clear_tags() empties).
+let link = client
+    .links()
+    .create("https://example.com/launch")
+    .tag_ids([&launch.id])
+    .send()
+    .await?;
+println!("{:?}", link.tags.iter().map(|t| &t.name).collect::<Vec<_>>());
+
+// Filter listings by tag, and stats to clicks on tagged links.
+let page = client
+    .links()
+    .list()
+    .tag_names(["launch", "q3"])
+    .tags_match(TagsMatch::All)
+    .send()
+    .await?;
+let report = client.stats().account().tag_names(["launch"]).send().await?;
+
+// Bulk tag and untag, by tag id, with per-item outcomes.
+let outcome = client
+    .links()
+    .bulk_update_tags(["id1", "id2"], [&launch.id], [])
+    .await?;
+
+// Deleting a tag removes it from every link that carried it.
+let gone = client.tags().delete(&launch.id).await?;
+println!("removed from {} links", gone.links_updated);
+# Ok(())
+# }
+```
+
 ## Statistics and exports
 
 ```rust,no_run
@@ -273,8 +322,8 @@ dead refresh token surfaces as `Error::SessionExpired`.
 ## Scope
 
 This SDK covers the v1 data plane: shortening (including emoji aliases),
-link management, bulk operations, claiming, statistics, exports, public link
-surfaces, the emoji catalogue, identity read, and Sign in with Spoo. Account
+link management, tags, bulk operations, claiming, statistics, exports, public
+link surfaces, the emoji catalogue, identity read, and Sign in with Spoo. Account
 administration (API key management, profile editing), service endpoints
 (health, contact), and the legacy v0 API are deliberately out of scope.
 
@@ -282,7 +331,8 @@ administration (API key management, profile editing), service endpoints
 |---|---|
 | Shorten | `links().create()`, `links().check_alias()` |
 | Manage | `links().list()`, `get()`, `get_by_address()`, `update()`, `set_status()`, `delete()`, `delete_all_on_domain()` |
-| Bulk | `bulk_delete()`, `bulk_set_status()`, `bulk_set_expiry()`, `bulk_move_domain()` |
+| Tags | `tags().list()`, `create()`, `update()`, `delete()` |
+| Bulk | `bulk_delete()`, `bulk_set_status()`, `bulk_set_expiry()`, `bulk_move_domain()`, `bulk_update_tags()` |
 | Claim | `links().claim()` |
 | Stats | `stats().account()`, `stats().for_link()` |
 | Export | `stats().export()`, `stats().export_link()` |

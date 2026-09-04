@@ -37,14 +37,17 @@ pub use resources::links::{
     AliasCheck, AliasIssue, AliasKind, BulkErrorCode, BulkOutcome, BulkResult, BulkSummary,
     CheckAliasBuilder, ClaimOutcome, ClaimRequest, ClaimResult, ClaimStatus, CreateLinkBuilder,
     DeletedLink, DomainPurge, Link, LinkItem, LinkStatus, Links, ListLinksBuilder, MetaTags,
-    MetaTagsInfo, SettableStatus, SortBy, SortOrder, UpdateLinkBuilder, UpdatedLink,
+    MetaTagsInfo, SettableStatus, SortBy, SortOrder, TagsMatch, UpdateLinkBuilder, UpdatedLink,
 };
 pub use resources::public::{
     Generation, Preview, PreviewDestination, PreviewGeoDestination, Public, PublicLinkFacts,
     PublicStats, PublicStatsBuilder, PublicStatus,
 };
 pub use resources::stats::{
-    AccountStatsBuilder, ComputedMetrics, Dimension, Export, ExportBuilder, ExportFormat,
-    FilterDimension, LinkStatsBuilder, LinkStatsReport, Metric, Scope, Stats, StatsReport, Summary,
-    TimeBucketInfo, TimeRange,
+    AccountExportBuilder, AccountStatsBuilder, ComputedMetrics, Dimension, Export, ExportBuilder,
+    ExportFormat, FilterDimension, LinkExportBuilder, LinkStatsBuilder, LinkStatsReport, Metric,
+    Scope, Stats, StatsReport, Summary, TimeBucketInfo, TimeRange,
+};
+pub use resources::tags::{
+    CreateTagBuilder, Tag, TagColor, TagDeleted, TagIcon, TagRef, Tags, UpdateTagBuilder,
 };

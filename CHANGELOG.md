@@ -13,6 +13,9 @@ errors, documentation on every public item.
   delete/status/expiry/domain, claiming anonymous links, account and
   per-link statistics, streaming exports, public stats and previews, the
   emoji catalogue (ETag-cached), identity read.
+- Link tags: the `tags()` resource (list/create/update/delete), `tag_ids`
+  on link create and update, tag filters on listings, stats and exports,
+  and `bulk_update_tags()`.
 - Authentication: API keys, anonymous mode, and Sign in with Spoo behind
   the `oauth` feature (PKCE, device-code exchange, self-refreshing
   single-flight sessions).
