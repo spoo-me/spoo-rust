@@ -86,6 +86,58 @@ async fn account_stats_query_encoding() {
 }
 
 #[tokio::test]
+async fn account_stats_tag_filters_ride_the_filters_json() {
+    let (server, client) = common::server_and_client().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/stats"))
+        .and(query_param(
+            "filters",
+            r#"{"browser":["Chrome"],"tag":["launch","q3"],"tag_id":["665f0c2f9e7a4b1d2c3d4e5f"]}"#,
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(stats_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .stats()
+        .account()
+        .filter(FilterDimension::Browser, ["Chrome"])
+        .tag_names(["launch"])
+        .tag_names(["q3"])
+        .tag_ids(["665f0c2f9e7a4b1d2c3d4e5f"])
+        .send()
+        .await
+        .expect("tag-filtered stats load");
+}
+
+#[tokio::test]
+async fn export_tag_filters_ride_the_filters_json() {
+    let (server, client) = common::server_and_client().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/export"))
+        .and(query_param("format", "json"))
+        .and(query_param(
+            "filters",
+            r#"{"tag":["launch"],"tag_id":["665f0c2f9e7a4b1d2c3d4e5f"]}"#,
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("{}", "application/json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .stats()
+        .export()
+        .format(ExportFormat::Json)
+        .tag_names(["launch"])
+        .tag_ids(["665f0c2f9e7a4b1d2c3d4e5f"])
+        .send()
+        .await
+        .expect("tag-filtered export downloads");
+}
+
+#[tokio::test]
 async fn link_stats_carries_identity() {
     let (server, client) = common::server_and_client().await;
     let mut body = stats_body();

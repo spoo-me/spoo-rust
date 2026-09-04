@@ -10,7 +10,7 @@ use wiremock::{Mock, ResponseTemplate};
 
 use spoo_me::{
     AliasIssue, AliasKind, BulkErrorCode, ClaimRequest, ClaimStatus, LinkStatus, MetaTags,
-    SettableStatus, SortBy, SortOrder,
+    SettableStatus, SortBy, SortOrder, TagColor, TagIcon, TagsMatch,
 };
 
 fn link_body() -> serde_json::Value {
@@ -91,6 +91,106 @@ async fn create_omits_unset_fields() {
         .send()
         .await
         .expect("bare create succeeds");
+}
+
+#[tokio::test]
+async fn create_with_tags_sends_ids_and_decodes_refs() {
+    let (server, client) = common::server_and_client().await;
+    let mut body = link_body();
+    body["tags"] = json!([
+        {"id": "t1", "name": "launch", "color": "violet", "icon": "rocket"}
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/shorten"))
+        .and(body_json(json!({
+            "long_url": "https://example.com/launch",
+            "tag_ids": ["t1"]
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(body))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let link = client
+        .links()
+        .create("https://example.com/launch")
+        .tag_ids(["t1"])
+        .send()
+        .await
+        .expect("create succeeds");
+    assert_eq!(link.tags.len(), 1);
+    assert_eq!(link.tags[0].name, "launch");
+    assert_eq!(link.tags[0].color, TagColor::Violet);
+    assert_eq!(link.tags[0].icon, TagIcon::Rocket);
+}
+
+#[tokio::test]
+async fn links_without_tags_field_decode_to_empty() {
+    let (server, client) = common::server_and_client().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/urls/665f0c2f9e7a4b1d2c3d4e5f"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "665f0c2f9e7a4b1d2c3d4e5f",
+            "password_set": false
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let link = client
+        .links()
+        .get("665f0c2f9e7a4b1d2c3d4e5f")
+        .await
+        .expect("get succeeds");
+    assert!(link.tags.is_empty());
+}
+
+#[tokio::test]
+async fn update_tag_ids_replaces_and_clear_sends_null() {
+    let (server, client) = common::server_and_client().await;
+    let updated = json!({
+        "id": "665f0c2f9e7a4b1d2c3d4e5f",
+        "password_set": false,
+        "updated_at": 1704067300,
+        "tags": [{"id": "t2", "name": "q3", "color": "teal", "icon": "flag"}]
+    });
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/urls/665f0c2f9e7a4b1d2c3d4e5f"))
+        .and(body_json(json!({"tag_ids": ["t2"]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(updated))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/urls/665f0c2f9e7a4b1d2c3d4e5f"))
+        .and(body_json(json!({"tag_ids": null})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "665f0c2f9e7a4b1d2c3d4e5f",
+            "password_set": false,
+            "updated_at": 1704067300,
+            "tags": []
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let link = client
+        .links()
+        .update("665f0c2f9e7a4b1d2c3d4e5f")
+        .tag_ids(["t2"])
+        .send()
+        .await
+        .expect("replace succeeds");
+    assert_eq!(link.tags[0].name, "q3");
+
+    let link = client
+        .links()
+        .update("665f0c2f9e7a4b1d2c3d4e5f")
+        .clear_tags()
+        .send()
+        .await
+        .expect("clear succeeds");
+    assert!(link.tags.is_empty());
 }
 
 #[tokio::test]
@@ -260,6 +360,35 @@ async fn list_filter_is_one_json_param() {
 }
 
 #[tokio::test]
+async fn list_tag_filters_share_the_filter_param() {
+    let (server, client) = common::server_and_client().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/urls"))
+        .and(query_param(
+            "filter",
+            r#"{"status":"ACTIVE","tagIds":["t1"],"tagNames":["launch","q3"],"tagsMatch":"all"}"#,
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [], "page": 1, "pageSize": 20, "total": 0, "hasNext": false,
+            "sortBy": "created_at", "sortOrder": "descending"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .links()
+        .list()
+        .status(SettableStatus::Active)
+        .tag_ids(["t1"])
+        .tag_names(["launch", "q3"])
+        .tags_match(TagsMatch::All)
+        .send()
+        .await
+        .expect("tag-filtered list succeeds");
+}
+
+#[tokio::test]
 async fn check_alias_decodes_typed_reason() {
     let (server, client) = common::server_and_client().await;
     Mock::given(method("GET"))
@@ -338,6 +467,69 @@ async fn bulk_expiry_clear_sends_null() {
         .bulk_set_expiry(["665f0c2f9e7a4b1d2c3d4e5f"], None)
         .await
         .expect("bulk expiry clear succeeds");
+}
+
+#[tokio::test]
+async fn bulk_update_tags_sends_add_and_remove() {
+    let (server, client) = common::server_and_client().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/urls/bulk/tags"))
+        .and(body_json(json!({
+            "ids": ["665f0c2f9e7a4b1d2c3d4e5f", "665f0c2f9e7a4b1d2c3d4e60"],
+            "add": ["t1"],
+            "remove": ["t2", "t3"]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "summary": {"total": 2, "succeeded": 1, "failed": 1},
+            "results": [
+                {"id": "665f0c2f9e7a4b1d2c3d4e5f", "alias": "a", "ok": true},
+                {"id": "665f0c2f9e7a4b1d2c3d4e60", "alias": "b", "ok": false,
+                 "error_code": "validation_error", "error": "over 10 tags"}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let outcome = client
+        .links()
+        .bulk_update_tags(
+            ["665f0c2f9e7a4b1d2c3d4e5f", "665f0c2f9e7a4b1d2c3d4e60"],
+            ["t1"],
+            ["t2", "t3"],
+        )
+        .await
+        .expect("bulk tags call itself succeeds");
+    assert_eq!(outcome.summary.succeeded, 1);
+    assert_eq!(
+        outcome.results[1].error_code,
+        Some(BulkErrorCode::ValidationError)
+    );
+}
+
+#[tokio::test]
+async fn bulk_update_tags_remove_only_sends_empty_add() {
+    let (server, client) = common::server_and_client().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/urls/bulk/tags"))
+        .and(body_json(json!({
+            "ids": ["665f0c2f9e7a4b1d2c3d4e5f"],
+            "add": [],
+            "remove": ["t2"]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "summary": {"total": 1, "succeeded": 1, "failed": 0},
+            "results": [{"id": "665f0c2f9e7a4b1d2c3d4e5f", "ok": true}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .links()
+        .bulk_update_tags(["665f0c2f9e7a4b1d2c3d4e5f"], [], ["t2"])
+        .await
+        .expect("remove-only bulk succeeds");
 }
 
 #[tokio::test]
